@@ -1,5 +1,10 @@
 <div align="center">
 
+# FreeDeepseekAPI
+
+面向 [chat.deepseek.com](https://chat.deepseek.com) 的本地 OpenAI / Anthropic / Responses 代理。  
+使用 Web 登录，无需付费 API Key。
+
 [English](README.md) · [Русский](README.ru.md) · **简体中文**
 
 <p>
@@ -18,8 +23,6 @@
 </p>
 
 </div>
-
-面向 [chat.deepseek.com](https://chat.deepseek.com) 的本地 OpenAI / Anthropic / Responses 代理。使用 Web 登录，不需要付费 API Key。
 
 ## 开始
 

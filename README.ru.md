@@ -1,5 +1,10 @@
 <div align="center">
 
+# FreeDeepseekAPI
+
+Локальный прокси OpenAI / Anthropic / Responses над [chat.deepseek.com](https://chat.deepseek.com).  
+Web-логин, без платного API-ключа.
+
 [English](README.md) · **Русский** · [简体中文](README.zh.md)
 
 <p>
@@ -18,8 +23,6 @@
 </p>
 
 </div>
-
-Локальный прокси OpenAI / Anthropic / Responses над [chat.deepseek.com](https://chat.deepseek.com). Нужен Web-логин, не платный API-ключ.
 
 ## Старт
 

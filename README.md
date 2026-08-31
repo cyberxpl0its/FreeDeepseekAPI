@@ -1,5 +1,10 @@
 <div align="center">
 
+# FreeDeepseekAPI
+
+Local OpenAI / Anthropic / Responses proxy for [chat.deepseek.com](https://chat.deepseek.com).  
+Web login, no paid API key.
+
 **English** · [Русский](README.ru.md) · [简体中文](README.zh.md)
 
 <p>
@@ -20,8 +25,6 @@
 </p>
 
 </div>
-
-Local OpenAI / Anthropic / Responses proxy in front of [chat.deepseek.com](https://chat.deepseek.com). Uses your Web login, not a paid API key.
 
 ## Start
 
