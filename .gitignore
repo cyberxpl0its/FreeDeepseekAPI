@@ -1,0 +1,10 @@
+.DS_Store
+node_modules/
+.env
+.env.*
+deepseek-auth.json
+auth.json
+*.pem
+.chrome-for-testing-profile-deepseek/
+.freedeepseek-api/
+.cursor/settings.json

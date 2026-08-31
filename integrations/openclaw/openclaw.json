@@ -1,0 +1,48 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "freedeepseek/deepseek-v4-flash"
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "freedeepseek": {
+        "baseUrl": "http://127.0.0.1:9655/v1",
+        "apiKey": "local",
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "deepseek-v4-flash",
+            "name": "deepseek-v4-flash",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "deepseek-v4-pro",
+            "name": "deepseek-v4-pro",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          },
+          {
+            "id": "deepseek-v4-pro-thinking",
+            "name": "deepseek-v4-pro-thinking",
+            "reasoning": true,
+            "input": ["text"],
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}

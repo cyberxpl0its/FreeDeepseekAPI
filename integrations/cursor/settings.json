@@ -1,0 +1,4 @@
+{
+  "openai.baseUrl": "http://127.0.0.1:9655/v1",
+  "openai.apiBase": "http://127.0.0.1:9655/v1"
+}

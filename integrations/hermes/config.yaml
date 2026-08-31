@@ -1,0 +1,6 @@
+model:
+  default: deepseek-v4-flash
+  provider: custom
+  base_url: http://127.0.0.1:9655/v1
+  api_key: local
+  api_mode: chat_completions

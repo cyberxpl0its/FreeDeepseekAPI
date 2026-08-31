@@ -1,0 +1,7 @@
+{
+  "token": "YOUR_DEEPSEEK_AUTH_TOKEN_HERE",
+  "hif_dliq": "YOUR_HIF_DLIQ_VALUE_HERE",
+  "hif_leim": "YOUR_HIF_LEIM_VALUE_HERE",
+  "cookie": "ds_session_id=YOUR_SESSION_ID_HERE; smidV2=YOUR_SMIDV2_HERE",
+  "wasmUrl": "https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm"
+}
