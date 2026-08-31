@@ -1,12 +1,8 @@
 <div align="center">
 
-<img src="docs/assets/header.gif" alt="FreeDeepseekAPI" width="960" />
+<img src="docs/assets/header.png" alt="FreeDeepseekAPI" width="960" />
 
 **English** · [Русский](README.ru.md) · [简体中文](README.zh.md)
-
-<br/>
-
-<img src="https://readme-typing-svg.demolab.com?font=IBM+Plex+Sans&weight=600&size=20&duration=2800&pause=900&color=3EE0C8&center=true&vCenter=true&width=720&lines=OpenAI-compatible+proxy+for+DeepSeek+Web;V4-Flash+Instant+%C2%B7+V4-Pro+Expert;One-click+Claude+Code+%C2%B7+Codex+%C2%B7+Hermes+%C2%B7+OpenClaw+%C2%B7+Cursor" alt="tagline" />
 
 <p>
   <a href="https://github.com/dekrezz/FreeDeepseekAPI/stargazers"><img src="https://img.shields.io/github/stars/dekrezz/FreeDeepseekAPI?style=for-the-badge&logo=github&color=3ee0c8&label=stars" alt="GitHub stars" /></a>
