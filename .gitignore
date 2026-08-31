@@ -7,4 +7,5 @@ auth.json
 *.pem
 .chrome-for-testing-profile-deepseek/
 .freedeepseek-api/
-.cursor/settings.json
+accounts/*.json
+/accounts/*.json

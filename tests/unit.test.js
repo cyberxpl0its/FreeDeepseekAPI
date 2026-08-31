@@ -236,6 +236,7 @@ test('Containerfile keeps the rootless Podman runtime minimal and fail-closed', 
   assert.deepEqual(copyLines, [
     'COPY --chown=1000:1000 package.json server.js ./',
     'COPY --chown=1000:1000 lib/pow.js ./lib/pow.js',
+    'COPY --chown=1000:1000 dashboard ./dashboard',
   ]);
   assert.doesNotMatch(containerfile, /^\s*(?:COPY|ADD)\s+\.\s/m);
   assert.match(containerfile, /^USER 1000:1000$/m);
@@ -626,6 +627,53 @@ test('account rotation clears a foreign remote session and preserves local recov
   assert.equal(session.history.length, 1);
 });
 
+test('simultaneous holders are routed onto different idle accounts', (t) => {
+  const originalAccounts = serverInternals.accounts.splice(0);
+  const holders = [];
+  t.after(() => {
+    for (const holder of holders) serverInternals.releaseAccountChatLock(holder);
+    serverInternals.accounts.splice(0, serverInternals.accounts.length, ...originalAccounts);
+  });
+  serverInternals.accounts.push(
+    { id: 'acct_a', config: { token: 'a', cookie: 'a' }, cooldownUntil: 0, lastUsedAt: 0, headers: {} },
+    { id: 'acct_b', config: { token: 'b', cookie: 'b' }, cooldownUntil: 0, lastUsedAt: 0, headers: {} },
+  );
+  const h1 = { id: 'req-1', agentId: 'agent-1' };
+  const h2 = { id: 'req-2', agentId: 'agent-2' };
+  holders.push(h1, h2);
+  const first = serverInternals.selectAccountForSession(serverInternals.createSession(), h1);
+  serverInternals.acquireAccountChatLock(first, h1);
+  const second = serverInternals.selectAccountForSession(serverInternals.createSession(), h2);
+  serverInternals.acquireAccountChatLock(second, h2);
+  assert.notEqual(first.id, second.id);
+  assert.equal(serverInternals.listAccountChatLocks().length, 2);
+});
+
+test('a second holder cannot share a busy sticky account', (t) => {
+  const originalAccounts = serverInternals.accounts.splice(0);
+  const h1 = { id: 'req-1', agentId: 'agent-1' };
+  t.after(() => {
+    serverInternals.releaseAccountChatLock(h1);
+    serverInternals.accounts.splice(0, serverInternals.accounts.length, ...originalAccounts);
+  });
+  serverInternals.accounts.push(
+    { id: 'acct_a', config: { token: 'a', cookie: 'a' }, cooldownUntil: 0, lastUsedAt: 0, headers: {} },
+  );
+  const first = serverInternals.selectAccountForSession(serverInternals.createSession(), h1);
+  serverInternals.acquireAccountChatLock(first, h1);
+  const sticky = serverInternals.createSession();
+  sticky.accountId = 'acct_a';
+  assert.throws(
+    () => serverInternals.selectAccountForSession(sticky, { id: 'req-2', agentId: 'agent-2' }),
+    (err) => err.status === 429 && err.type === 'concurrent_chat_blocked',
+  );
+});
+
+test('Flash cost estimate uses official off-peak per-million rates', () => {
+  assert.equal(serverInternals.modelCostUsd('deepseek-v4-flash', 1_000_000, 1_000_000), 0.88);
+  assert.equal(serverInternals.modelCostUsd('deepseek-v4-pro', 1_000_000, 0), 0.66);
+});
+
 test('cross-account continuation is accepted only with a fresh recovery prompt', () => {
   assert.equal(serverInternals.isContinuationRecoverySafe('one', {
     account: { id: 'one' },
@@ -781,6 +829,29 @@ test('stream helpers preserve the request-level exact CORS origin', () => {
   }
 });
 
+test('OpenAI stream emits a usage chunk before DONE so clients can show tokens', () => {
+  const response = {
+    id: 'ds-test',
+    created: 1,
+    model: 'deepseek-v4-flash',
+    choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }],
+    usage: { prompt_tokens: 12, completion_tokens: 4, total_tokens: 16 },
+  };
+  const chunks = [];
+  const res = {
+    writeHead: () => {},
+    write: (chunk) => { chunks.push(String(chunk)); },
+    end: () => {},
+  };
+  serverInternals.sendOpenAIStream(res, response);
+  const body = chunks.join('');
+  assert.match(body, /"prompt_tokens":12/);
+  assert.match(body, /"completion_tokens":4/);
+  assert.match(body, /"choices":\[\]/);
+  assert.match(body, /\[DONE\]/);
+  assert.ok(body.indexOf('"usage"') < body.indexOf('[DONE]'));
+});
+
 test('one-click agent setup writes Claude Code and Hermes configs into SETUP_HOME', () => {
   const dir = tmpdir();
   const res = runNode([
@@ -810,4 +881,65 @@ test('one-click agent setup writes Claude Code and Hermes configs into SETUP_HOM
   const toml = fs.readFileSync(path.join(dir, '.codex', 'config.toml'), 'utf8');
   assert.match(toml, /model_provider = "freedeepseek"/);
   assert.match(toml, /wire_api = "responses"/);
+});
+
+test('account patch persists display name and skips paused logins', (t) => {
+  const dir = tmpdir();
+  const file = path.join(dir, 'worker.json');
+  fs.writeFileSync(file, JSON.stringify({ token: 'tok', cookie: 'ck' }));
+  const original = serverInternals.accounts.splice(0);
+  t.after(() => {
+    serverInternals.accounts.splice(0, serverInternals.accounts.length, ...original);
+  });
+  serverInternals.accounts.push({
+    id: 'worker',
+    file,
+    config: { token: 'tok', cookie: 'ck' },
+    cooldownUntil: 0,
+    lastUsedAt: 0,
+    headers: {},
+    failures: 0,
+  });
+
+  const named = serverInternals.applyAccountPatch('worker', { name: 'Office' });
+  assert.equal(named.name, 'Office');
+  assert.equal(named.enabled, true);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).name, 'Office');
+
+  const paused = serverInternals.applyAccountPatch('worker', { enabled: false });
+  assert.equal(paused.enabled, false);
+  assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).enabled, false);
+  assert.throws(
+    () => serverInternals.selectAccountForSession(serverInternals.createSession()),
+    (err) => err.status === 503 && err.type === 'no_auth',
+  );
+
+  const resumed = serverInternals.applyAccountPatch('worker', { enabled: true, name: '' });
+  assert.equal(resumed.enabled, true);
+  assert.equal(resumed.name, 'worker');
+  assert.equal('enabled' in JSON.parse(fs.readFileSync(file, 'utf8')), false);
+  const selected = serverInternals.selectAccountForSession(serverInternals.createSession());
+  assert.equal(selected.id, 'worker');
+});
+
+test('paused sticky account rotates onto another ready login', (t) => {
+  const dir = tmpdir();
+  const aFile = path.join(dir, 'a.json');
+  const bFile = path.join(dir, 'b.json');
+  fs.writeFileSync(aFile, JSON.stringify({ token: 'a', cookie: 'a' }));
+  fs.writeFileSync(bFile, JSON.stringify({ token: 'b', cookie: 'b' }));
+  const original = serverInternals.accounts.splice(0);
+  t.after(() => {
+    serverInternals.accounts.splice(0, serverInternals.accounts.length, ...original);
+  });
+  serverInternals.accounts.push(
+    { id: 'acct_a', file: aFile, config: { token: 'a', cookie: 'a' }, cooldownUntil: 0, lastUsedAt: 0, headers: {}, failures: 0 },
+    { id: 'acct_b', file: bFile, config: { token: 'b', cookie: 'b' }, cooldownUntil: 0, lastUsedAt: 0, headers: {}, failures: 0 },
+  );
+  serverInternals.applyAccountPatch('acct_a', { enabled: false });
+  const session = serverInternals.createSession();
+  session.accountId = 'acct_a';
+  const selected = serverInternals.selectAccountForSession(session);
+  assert.equal(selected.id, 'acct_b');
+  assert.equal(session.accountId, 'acct_b');
 });

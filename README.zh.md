@@ -3,7 +3,7 @@
 # FreeDeepseekAPI
 
 面向 [chat.deepseek.com](https://chat.deepseek.com) 的本地 OpenAI / Anthropic / Responses 代理。  
-使用 Web 登录，无需付费 API Key。
+使用 Web 登录，无需付费 API Key。**2–3 个账号**并发。控制台：`/dashboard`。
 
 [English](README.md) · [Русский](README.ru.md) · **简体中文**
 

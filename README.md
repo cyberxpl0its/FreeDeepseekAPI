@@ -3,7 +3,7 @@
 # FreeDeepseekAPI
 
 Local OpenAI / Anthropic / Responses proxy for [chat.deepseek.com](https://chat.deepseek.com).  
-Web login, no paid API key.
+Web login, no paid API key. **2–3 accounts** for concurrent clients. Dashboard at `/dashboard`.
 
 **English** · [Русский](README.ru.md) · [简体中文](README.zh.md)
 
@@ -21,6 +21,7 @@ Web login, no paid API key.
   <a href="docs/agents.md">One-click agents</a> ·
   <a href="docs/auth.md">Auth</a> ·
   <a href="docs/api.md">API</a> ·
+  <a href="http://127.0.0.1:9655/dashboard">Dashboard</a> ·
   <a href="https://t.me/forgetmeai">Telegram</a>
 </p>
 
@@ -31,13 +32,17 @@ Web login, no paid API key.
 ```bash
 npm run auth
 npm start
+# http://127.0.0.1:9655/dashboard
 ```
 
 ```bash
 curl http://127.0.0.1:9655/v1/chat/completions \
   -H 'Content-Type: application/json' \
+  -H 'x-agent-session: worker-a' \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ping"}]}'
 ```
+
+Two clients at once: two Web logins in `accounts/` (or the dashboard **Add account**), each with its own `x-agent-session`. One login cannot send two chats in parallel.
 
 ## Models
 
@@ -75,8 +80,8 @@ Templates: [`integrations/`](integrations/).
 |---|---|
 | [Models](docs/models.md) | Instant / Expert IDs |
 | [Agents](docs/agents.md) | one-click wiring |
-| [Auth](docs/auth.md) | `deepseek-auth.json` |
-| [HTTP API](docs/api.md) | `/v1/chat/completions`, `/v1/messages`, `/v1/responses` |
+| [HTTP API](docs/api.md) | completions, pool, `429`, env |
+| [Auth](docs/auth.md) | 1–3 Web logins, dashboard |
 
 ## Docker
 

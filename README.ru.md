@@ -3,7 +3,7 @@
 # FreeDeepseekAPI
 
 Локальный прокси OpenAI / Anthropic / Responses над [chat.deepseek.com](https://chat.deepseek.com).  
-Web-логин, без платного API-ключа.
+Web-логин, без платного API-ключа. **2–3 аккаунта** для параллельных клиентов. Дашборд: `/dashboard`.
 
 [English](README.md) · **Русский** · [简体中文](README.zh.md)
 
@@ -19,6 +19,7 @@ Web-логин, без платного API-ключа.
   <a href="docs/ru/models.md">Модели</a> ·
   <a href="docs/ru/agents.md">Агенты</a> ·
   <a href="docs/auth.md">Авторизация</a> ·
+  <a href="docs/api.md">API</a> ·
   <a href="https://t.me/forgetmeai">Telegram</a>
 </p>
 
@@ -29,6 +30,7 @@ Web-логин, без платного API-ключа.
 ```bash
 npm run auth
 npm start
+# http://127.0.0.1:9655/dashboard
 ```
 
 ```bash
@@ -73,8 +75,8 @@ npm run setup:agents
 |---|---|
 | [Модели](docs/ru/models.md) | Instant / Expert |
 | [Агенты](docs/ru/agents.md) | one-click |
-| [Авторизация](docs/auth.md) | `deepseek-auth.json` |
-| [HTTP API](docs/api.md) | эндпоинты |
+| [Авторизация](docs/auth.md) | 1–3 Web-логина |
+| [HTTP API](docs/api.md) | пул, `429`, env |
 
 ## Звёзды
 

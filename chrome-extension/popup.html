@@ -1,48 +1,61 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
-    body { width: 420px; padding: 16px; background: #1a1a2e; color: #e0e0e0; font-size: 13px; }
-    h1 { font-size: 16px; margin-bottom: 4px; color: #4fc3f7; }
-    .sub { font-size: 11px; color: #888; margin-bottom: 14px; }
-    .status { padding: 8px 12px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; }
-    .status.ok { background: #1b5e2033; border: 1px solid #2e7d32; color: #66bb6a; }
-    .status.warn { background: #e6510033; border: 1px solid #e65100; color: #ff9800; }
-    .status.err { background: #b71c1c33; border: 1px solid #c62828; color: #ef5350; }
-    .btn-row { display: flex; gap: 8px; margin-bottom: 12px; }
-    .btn-row button { flex: 1; padding: 8px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; font-weight: 600; }
-    .btn-primary { background: #1565c0; color: #fff; }
-    .btn-primary:hover { background: #1976d2; }
-    .btn-success { background: #2e7d32; color: #fff; }
-    .btn-success:hover { background: #388e3c; }
-    .btn-warn { background: #e65100; color: #fff; }
-    .btn-warn:hover { background: #ef6c00; }
-    .json-display { background: #0d1117; border: 1px solid #333; border-radius: 4px; padding: 8px; font-size: 10px; font-family: 'Courier New', monospace; color: #7ee787; white-space: pre-wrap; word-break: break-all; max-height: 180px; overflow-y: auto; margin-bottom: 8px; }
-    .field label { display: block; font-size: 11px; color: #999; margin-bottom: 4px; }
-    .detail { font-size: 10px; color: #666; text-align: center; }
-  </style>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeepSeek Session</title>
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <h1>🔑 DeepSeek Auth Exporter</h1>
-  <div class="sub">Export credentials for <code>FreeDeepseekAPI</code></div>
+  <header class="masthead">
+    <h1 class="visually-hidden">DeepSeek Session</h1>
+    <img class="brand" src="icons/logo.svg" width="140" height="30" alt="DeepSeek">
+    <p class="sub">Export for FreeDeepseekAPI</p>
+  </header>
 
-  <div id="status" class="status warn">⏳ Loading...</div>
+  <section id="callout" class="callout" hidden>
+    <p id="calloutTitle" class="callout-title"></p>
+    <p id="calloutBody" class="callout-body"></p>
+  </section>
 
-  <div class="btn-row">
-    <button id="btnCollect" class="btn-primary">🔄 Collect from Tab</button>
-    <button id="btnCopy" class="btn-success">📋 Copy JSON</button>
-    <button id="btnSave" class="btn-warn">💾 Download File</button>
+  <button type="button" id="btnCollect" class="btn btn-filled">
+    <svg class="icon" viewBox="0 0 20 20" aria-hidden="true">
+      <path fill="currentColor" d="M10 3a7 7 0 1 0 6.32 4.09.75.75 0 0 0-1.36-.62A5.5 5.5 0 1 1 10 4.5V6l3-2.25L10 1.5V3z"/>
+    </svg>
+    Collect from Tab
+  </button>
+
+  <section class="group" aria-label="Session fields">
+    <div class="row">
+      <span class="label">Token</span>
+      <span id="rowToken" class="value">—</span>
+    </div>
+    <div class="row">
+      <span class="label">Cookies</span>
+      <span id="rowCookie" class="value">—</span>
+    </div>
+    <div class="row">
+      <span class="label">Device headers</span>
+      <span id="rowHif" class="value">Optional</span>
+    </div>
+  </section>
+
+  <div class="actions">
+    <button type="button" id="btnCopy" class="btn btn-tinted" disabled>Copy JSON</button>
+    <button type="button" id="btnSave" class="btn btn-tinted" disabled>Save File</button>
   </div>
 
-  <div class="field">
-    <label>Export Preview → <code>deepseek-auth.json</code></label>
-    <div id="jsonPreview" class="json-display">{ }</div>
-  </div>
+  <details class="json-block">
+    <summary>
+      <span>JSON</span>
+      <svg class="disclosure" viewBox="0 0 9 16" aria-hidden="true">
+        <path fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" d="M2 2.5 7 8 2 13.5"/>
+      </svg>
+    </summary>
+    <pre id="jsonPreview" class="json"></pre>
+  </details>
 
-  <div class="detail" id="detail">Open chat.deepseek.com, then click Collect</div>
-
+  <p id="detail" class="caption">Open chat.deepseek.com, then Collect.</p>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -1,17 +1,106 @@
 # HTTP API
 
-Default: `http://127.0.0.1:9655`
+Local OpenAI / Anthropic / Responses proxy. Default: `http://127.0.0.1:9655`.
 
-| Method | Path |
+This is a **Web-session** API, not `api.deepseek.com`. One DeepSeek login can serve **one in-flight chat**. Put 2–3 logins in the pool so concurrent clients fan out. Dashboard: [http://127.0.0.1:9655/dashboard](http://127.0.0.1:9655/dashboard).
+
+## Endpoints
+
+| Method | Path | Auth | Purpose |
+|---|---|---|---|
+| GET | `/health` | public | Liveness. Account list if no `PROXY_API_KEY` or Bearer matches |
+| GET | `/readyz` | public | `200` only if at least one account can serve now |
+| GET | `/v1/models` | proxy key if set | OpenAI model list |
+| GET | `/v1/model-capabilities` | proxy key if set | Instant/Expert + thinking/search flags |
+| GET | `/v1/sessions` | proxy key if set | Sticky agent sessions |
+| POST | `/v1/chat/completions` | proxy key if set | OpenAI Chat Completions (`stream` true\|false) |
+| POST | `/v1/messages` | proxy key if set | Anthropic Messages |
+| POST | `/v1/responses` | proxy key if set | OpenAI Responses |
+| POST | `/reset-session?agent=<id\|all>` | proxy key if set | Drop a sticky Web chat |
+| GET | `/dashboard` | loopback, or Bearer | Account / usage / request log UI |
+| GET | `/v1/admin/state` | loopback, or Bearer | Accounts, locks, spend, last 200 requests |
+| POST | `/v1/admin/accounts` | loopback, or Bearer | Import a `deepseek-auth.json` |
+| PATCH | `/v1/admin/accounts` | loopback, or Bearer | `{ id, name?, enabled?, auth? }` — rename, pause, replace session |
+| DELETE | `/v1/admin/accounts?id=` | loopback, or Bearer | Remove a pool file |
+| POST | `/v1/admin/accounts/cooldown-clear?id=` | loopback, or Bearer | Clear 401/429 cooldown |
+
+## Completions
+
+```bash
+curl -sS http://127.0.0.1:9655/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'x-agent-session: worker-a' \
+  -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"ping"}]}'
+```
+
+| Header / field | Effect |
 |---|---|
-| GET | `/health` |
-| GET | `/readyz` |
-| GET | `/v1/models` |
-| GET | `/v1/model-capabilities` |
-| GET | `/v1/sessions` |
-| POST | `/v1/chat/completions` |
-| POST | `/v1/messages` (Anthropic Messages) |
-| POST | `/v1/responses` (OpenAI Responses) |
-| POST | `/reset-session?agent=<id\|all>` |
+| `x-agent-session` or `user` | Sticky DeepSeek chat. **Give each concurrent client a different value** |
+| `Authorization: Bearer` | Required when `PROXY_API_KEY` / `REQUIRE_PROXY_API_KEY` is set |
+| `model` | `deepseek-v4-flash` / `deepseek-v4-pro` plus `-thinking` / `-search` |
+| `stream` | SSE chunks; last chunk includes `usage` |
+| `x-account-id` (response) | Which Web login served the request |
 
-Set `PROXY_API_KEY` and send `Authorization: Bearer <key>`. Sessions stick to `x-agent-session` / `user`. Env: `HOST`, `PORT`, `DEEPSEEK_AUTH_PATH`, `NON_INTERACTIVE`, `REQUIRE_PROXY_API_KEY`. Docker: [`Containerfile`](../Containerfile).
+Loopback clients without `x-agent-session` share `dev-agent`. Two parallel jobs on that id serialize on one account (or `429`).
+
+## Concurrency and account pool
+
+DeepSeek issues a multi-day ban if two chats send on the **same** Web login at once.
+
+| Situation | Behavior |
+|---|---|
+| Two requests, two free accounts | Routed to different logins |
+| Same `x-agent-session` overlapping | `429 concurrent_chat_blocked`, `Retry-After: 5` |
+| All logins busy | `429 concurrent_chat_blocked` |
+| Account 401/403/429 | Cooldown, next request uses another ready login |
+| Global flood | `503 overloaded` when `in_flight` ≥ `DEEPSEEK_MAX_CONCURRENT` (default 24) |
+
+Pool files (mode `600`, never commit):
+
+```text
+deepseek-auth.json          # first login (npm run auth / auth:import)
+accounts/worker-2.json     # dashboard “Add account” or a second import
+accounts/worker-3.json
+```
+
+Or:
+
+```bash
+export DEEPSEEK_AUTH_DIR=./accounts
+# or
+export DEEPSEEK_AUTH_PATH="$PWD/a.json,$PWD/b.json,$PWD/c.json"
+NON_INTERACTIVE=1 npm start
+```
+
+Import a second file without replacing the first:
+
+```bash
+npm run auth:import -- --input ~/Downloads/deepseek-auth.json --output ./accounts/worker-2.json
+```
+
+Then restart (or add it from the dashboard, which reloads the pool).
+
+## Errors
+
+| Status | `error.type` | What to do |
+|---|---|---|
+| 400 | `invalid_model` | Use an id from `GET /v1/models` |
+| 401 | `authentication_error` | Proxy key |
+| 429 | `concurrent_chat_blocked` | Retry; add another login; unique `x-agent-session` |
+| 429 | `rate_limit` | All logins in cooldown; honor `Retry-After` |
+| 503 | `overloaded` / `no_auth` | Backpressure, or no `deepseek-auth.json` |
+| 504 | `request_timeout` | `DEEPSEEK_REQUEST_DEADLINE_MS` (default 120000) |
+
+## Env
+
+| Env | Default | |
+|---|---|---|
+| `HOST` / `PORT` | `127.0.0.1` / `9655` | Bind. Non-loopback without a proxy key prints a warning |
+| `PROXY_API_KEY` / `REQUIRE_PROXY_API_KEY` | off | Protects `/v1/*` |
+| `DEEPSEEK_AUTH_PATH` | `./deepseek-auth.json` | One file, or comma-separated list |
+| `DEEPSEEK_AUTH_DIR` | `./accounts` if present | All `*.json` in that directory |
+| `DEEPSEEK_MAX_CONCURRENT` | `24` | Process-wide cap. Real parallelism is **number of idle logins** |
+| `DEEPSEEK_ACCOUNT_COOLDOWN_MS` | `600000` | After 401/403/429 |
+| `TRUST_PROXY` | off | If `1`, client IP uses `X-Forwarded-For` |
+
+Docker: [`Containerfile`](../Containerfile). Auth: [`auth.md`](auth.md). Models: [`models.md`](models.md).

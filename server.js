@@ -129,7 +129,7 @@ function isBrowserOriginAllowed(origin, allowedOrigins = PROXY_CORS_ORIGINS) {
 
 const CONTEXT_COMPACTED_HEADER = 'X-FreeDeepseek-Context-Compacted';
 function setCorsResponseHeaders(res) {
-    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'POST, GET, PATCH, DELETE, OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     res.setHeader('Access-Control-Expose-Headers', CONTEXT_COMPACTED_HEADER);
 }
@@ -146,6 +146,7 @@ const SESSION_TTL_MS = 2 * 60 * 60 * 1000;  // 2 hours
 
 // === DeepSeek Web API Config — loaded from external config file ===
 const DS_CONFIG_PATH = process.env.DEEPSEEK_AUTH_PATH || path.join(__dirname, 'deepseek-auth.json');
+const ACCOUNTS_DIR = process.env.DEEPSEEK_AUTH_DIR || path.join(__dirname, 'accounts');
 const DEFAULT_ACCOUNT_COOLDOWN_MS = Number(process.env.DEEPSEEK_ACCOUNT_COOLDOWN_MS || 10 * 60 * 1000);
 let DS_CONFIG = {};
 let dsHeaders = {};
@@ -197,7 +198,28 @@ function discoverAuthPaths() {
     if (process.env.DEEPSEEK_AUTH_PATH && process.env.DEEPSEEK_AUTH_PATH.includes(',')) {
         return process.env.DEEPSEEK_AUTH_PATH.split(',').map(s => s.trim()).filter(Boolean);
     }
-    return [DS_CONFIG_PATH];
+    const files = [];
+    if (fs.existsSync(DS_CONFIG_PATH)) files.push(path.resolve(DS_CONFIG_PATH));
+    try {
+        if (fs.existsSync(ACCOUNTS_DIR) && fs.statSync(ACCOUNTS_DIR).isDirectory()) {
+            for (const name of fs.readdirSync(ACCOUNTS_DIR).filter(f => f.endsWith('.json')).sort()) {
+                files.push(path.resolve(ACCOUNTS_DIR, name));
+            }
+        }
+    } catch (e) {
+        console.error(`[DS-API] Could not read accounts dir: ${e.message}`);
+    }
+    return files.length ? [...new Set(files)] : [DS_CONFIG_PATH];
+}
+function uniqueAccountId(file) {
+    const base = path.basename(file, '.json').replace(/[^a-zA-Z0-9._-]/g, '_') || 'account';
+    let id = base;
+    let n = 2;
+    while (accounts.some(a => a.id === id)) {
+        id = `${base}_${n}`;
+        n++;
+    }
+    return id;
 }
 function loadDeepSeekConfig({ fatal = true } = {}) {
     accounts.length = 0;
@@ -206,7 +228,7 @@ function loadDeepSeekConfig({ fatal = true } = {}) {
         try {
             const raw = fs.readFileSync(file, 'utf8');
             const config = JSON.parse(raw);
-            const id = `account_${accounts.length + 1}`;
+            const id = uniqueAccountId(file);
             accounts.push({ id, file, config, headers: buildBaseHeaders(config), cooldownUntil: 0, failures: 0, lastUsedAt: 0 });
         } catch (e) {
             console.error(`[DS-API] Could not load auth config ${file}: ${e.message}`);
@@ -224,31 +246,98 @@ function loadDeepSeekConfig({ fatal = true } = {}) {
     }
     return false;
 }
-function hasAuthConfig() { return accounts.some(a => a.config.token && a.config.cookie); }
+function hasAuthConfig() { return accounts.some(accountHasCredentials); }
+function accountHasCredentials(account) {
+    return Boolean(account?.config?.token && account?.config?.cookie);
+}
+function isAccountEnabled(account) {
+    return account?.config?.enabled !== false;
+}
+function accountCanServe(account, now = Date.now()) {
+    return accountHasCredentials(account) && isAccountEnabled(account) && (account.cooldownUntil || 0) <= now;
+}
+const accountLocks = new Map();
+const requestLog = [];
+const MAX_REQUEST_LOG = 400;
+const usageByAccount = new Map();
+
 function accountStatus(account) {
+    const lock = accountLocks.get(account.id);
+    const usage = usageByAccount.get(account.id) || { prompt_tokens: 0, completion_tokens: 0, usd: 0, requests: 0 };
     return {
         id: account.id,
-        ready: !!(account.config.token && account.config.cookie),
+        name: String(account.config.name || account.id),
+        file: path.basename(account.file || ''),
+        enabled: isAccountEnabled(account),
+        ready: accountHasCredentials(account),
+        token: Boolean(account.config.token),
+        cookies: String(account.config.cookie || '').split(';').filter(Boolean).length,
         cooldown: account.cooldownUntil > Date.now(),
         cooldown_remaining_sec: Math.max(0, Math.ceil((account.cooldownUntil - Date.now()) / 1000)),
+        busy: Boolean(lock),
+        busy_agent: lock?.agentId || null,
         failures: account.failures,
         last_used_at: account.lastUsedAt || null,
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        usd: usage.usd,
+        requests: usage.requests,
     };
 }
-function selectAccountForSession(session) {
+function isLockedByOther(account, holder) {
+    const lock = accountLocks.get(account.id);
+    return Boolean(lock && holder && lock.holder !== holder);
+}
+function acquireAccountChatLock(account, holder) {
+    if (!account || !holder) return;
+    const current = accountLocks.get(account.id);
+    if (current && current.holder !== holder) {
+        const err = new Error(`DeepSeek account ${account.id} is already serving another chat. Two chats on one Web login can trigger a multi-day ban.`);
+        err.status = 429;
+        err.retryAfter = 5;
+        err.type = 'concurrent_chat_blocked';
+        err.busy_agent = current.agentId;
+        throw err;
+    }
+    accountLocks.set(account.id, { holder, agentId: holder.agentId || null, since: Date.now() });
+}
+function releaseAccountChatLock(holder) {
+    if (!holder) return;
+    for (const [id, lock] of accountLocks) {
+        if (lock.holder === holder) accountLocks.delete(id);
+    }
+}
+function listAccountChatLocks() {
+    const now = Date.now();
+    return [...accountLocks.entries()].map(([id, lock]) => ({
+        account: id,
+        agent: lock.agentId || null,
+        age_ms: now - lock.since,
+    }));
+}
+function selectAccountForSession(session, holder = null) {
     const now = Date.now();
     if (session.accountId) {
         const sticky = accounts.find(a => a.id === session.accountId);
-        if (sticky && sticky.config.token && sticky.config.cookie && sticky.cooldownUntil <= now) return sticky;
+        if (sticky && accountCanServe(sticky, now)) {
+            if (isLockedByOther(sticky, holder)) {
+                const err = new Error(`Account ${sticky.id} is busy with another request. One DeepSeek login serves one in-flight chat.`);
+                err.status = 429;
+                err.retryAfter = 5;
+                err.type = 'concurrent_chat_blocked';
+                throw err;
+            }
+            return sticky;
+        }
         // A DeepSeek chat_session belongs to the auth account that created it.
-        // If that account disappeared, lost credentials, or is cooling down,
+        // If that account disappeared, lost credentials, is paused, or is cooling down,
         // never reuse its session id under a different account.
         resetRemoteSession(session);
         session.accountId = null;
     }
-    const ready = accounts.filter(a => a.config.token && a.config.cookie && a.cooldownUntil <= now);
+    const ready = accounts.filter(a => accountCanServe(a, now));
     if (ready.length === 0) {
-        const waiting = accounts.filter(a => a.config.token && a.config.cookie).sort((a, b) => a.cooldownUntil - b.cooldownUntil)[0];
+        const waiting = accounts.filter(a => accountHasCredentials(a) && isAccountEnabled(a)).sort((a, b) => a.cooldownUntil - b.cooldownUntil)[0];
         if (waiting) {
             const waitSec = Math.max(1, Math.ceil((waiting.cooldownUntil - now) / 1000));
             // Tagged so the request handler returns 429 + Retry-After instead of a
@@ -261,10 +350,262 @@ function selectAccountForSession(session) {
         noAuth.status = 503; noAuth.type = 'no_auth';
         throw noAuth;
     }
-    const account = ready[accountRoundRobin % ready.length];
+    const idle = holder ? ready.filter(a => !isLockedByOther(a, holder)) : ready;
+    if (idle.length === 0) {
+        const err = new Error(`All DeepSeek accounts are busy (${ready.length} in flight). Concurrent chats on one login are blocked. Retry shortly or add another account.`);
+        err.status = 429;
+        err.retryAfter = 5;
+        err.type = 'concurrent_chat_blocked';
+        throw err;
+    }
+    idle.sort((a, b) => (a.lastUsedAt || 0) - (b.lastUsedAt || 0) || a.id.localeCompare(b.id));
+    const account = idle[0];
     accountRoundRobin++;
     session.accountId = account.id;
     return account;
+}
+function clientIp(req) {
+    const raw = String(req.socket.remoteAddress || '').replace(/^::ffff:/, '');
+    if (raw === '::1') return '127.0.0.1';
+    if (isTruthy(process.env.TRUST_PROXY)) {
+        const fwd = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+        if (fwd) return fwd;
+    }
+    return raw || 'unknown';
+}
+function isLoopbackAddress(ip) {
+    return ip === '127.0.0.1' || ip === '::1' || ip === 'localhost' || /^127\./.test(ip);
+}
+function isDashboardAllowed(req) {
+    if (isProxyAuthorized(req.headers.authorization)) return true;
+    return isLoopbackAddress(clientIp(req));
+}
+function modelCostUsd(model, promptTokens, completionTokens) {
+    const pro = /pro/.test(String(model || ''));
+    const input = pro ? 0.66 : 0.22;
+    const output = pro ? 1.98 : 0.66;
+    return (Number(promptTokens || 0) / 1e6) * input + (Number(completionTokens || 0) / 1e6) * output;
+}
+function recordRequest(entry) {
+    requestLog.push(entry);
+    while (requestLog.length > MAX_REQUEST_LOG) requestLog.shift();
+    if (!entry.account) return;
+    const prev = usageByAccount.get(entry.account) || { prompt_tokens: 0, completion_tokens: 0, usd: 0, requests: 0 };
+    prev.prompt_tokens += entry.prompt_tokens || 0;
+    prev.completion_tokens += entry.completion_tokens || 0;
+    prev.usd += entry.usd || 0;
+    prev.requests += 1;
+    usageByAccount.set(entry.account, prev);
+}
+function jsonResponse(res, status, body, extraHeaders = {}) {
+    res.writeHead(status, { 'Content-Type': 'application/json', ...extraHeaders });
+    res.end(JSON.stringify(body));
+}
+function writeNewAccountFile(name, auth) {
+    fs.mkdirSync(ACCOUNTS_DIR, { recursive: true, mode: 0o700 });
+    const safe = String(name || 'account').replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 40) || 'account';
+    let file = path.join(ACCOUNTS_DIR, `${safe}.json`);
+    let n = 2;
+    while (fs.existsSync(file)) {
+        file = path.join(ACCOUNTS_DIR, `${safe}-${n}.json`);
+        n++;
+    }
+    fs.writeFileSync(file, JSON.stringify(serializeAccountConfig(auth), null, 2), { mode: 0o600 });
+    if (process.platform !== 'win32') fs.chmodSync(file, 0o600);
+    loadDeepSeekConfig({ fatal: false });
+    return file;
+}
+function serializeAccountConfig(config) {
+    const out = {
+        token: String(config.token || ''),
+        cookie: String(config.cookie || ''),
+        wasmUrl: String(config.wasmUrl || 'https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm'),
+    };
+    if (config.hif_dliq) out.hif_dliq = String(config.hif_dliq);
+    if (config.hif_leim) out.hif_leim = String(config.hif_leim);
+    const name = String(config.name || '').trim().slice(0, 80);
+    if (name) out.name = name;
+    if (config.enabled === false) out.enabled = false;
+    return out;
+}
+function persistAccountConfig(account) {
+    if (!account?.file) {
+        const err = new Error('Account has no auth file');
+        err.status = 400;
+        err.type = 'invalid_request';
+        throw err;
+    }
+    let existing = {};
+    try { existing = JSON.parse(fs.readFileSync(account.file, 'utf8')); } catch { /* keep known fields only */ }
+    if (!existing || typeof existing !== 'object' || Array.isArray(existing)) existing = {};
+    const out = { ...existing, ...serializeAccountConfig(account.config) };
+    if (!String(account.config.name || '').trim()) delete out.name;
+    if (account.config.enabled !== false) delete out.enabled;
+    fs.writeFileSync(account.file, JSON.stringify(out, null, 2), { mode: 0o600 });
+    if (process.platform !== 'win32') fs.chmodSync(account.file, 0o600);
+    account.headers = buildBaseHeaders(account.config);
+}
+function applyAccountPatch(id, patch = {}) {
+    const account = accounts.find(a => a.id === id);
+    if (!account) {
+        const err = new Error(`Unknown account ${id}`);
+        err.status = 404;
+        err.type = 'not_found';
+        throw err;
+    }
+    if ('name' in patch) {
+        const name = String(patch.name || '').trim().slice(0, 80);
+        if (name) account.config.name = name;
+        else delete account.config.name;
+    }
+    if ('enabled' in patch) {
+        const on = patch.enabled !== false && patch.enabled !== 0 && patch.enabled !== 'false';
+        if (on) delete account.config.enabled;
+        else account.config.enabled = false;
+    }
+    if (patch.auth && typeof patch.auth === 'object') {
+        const token = String(patch.auth.token || '').trim();
+        const cookie = String(patch.auth.cookie || '').trim();
+        if (!token || !cookie) {
+            const err = new Error('token and cookie are required');
+            err.status = 400;
+            err.type = 'invalid_auth';
+            throw err;
+        }
+        account.config.token = token;
+        account.config.cookie = cookie;
+        if ('hif_dliq' in patch.auth) account.config.hif_dliq = String(patch.auth.hif_dliq || '');
+        if ('hif_leim' in patch.auth) account.config.hif_leim = String(patch.auth.hif_leim || '');
+        if (patch.auth.wasmUrl) account.config.wasmUrl = String(patch.auth.wasmUrl);
+        account.cooldownUntil = 0;
+        account.failures = 0;
+    }
+    persistAccountConfig(account);
+    return accountStatus(account);
+}
+function removeAccountFile(id) {
+    const account = accounts.find(a => a.id === id);
+    if (!account?.file) return false;
+    const resolved = path.resolve(account.file);
+    const allowedRoots = [path.resolve(ACCOUNTS_DIR), path.dirname(path.resolve(DS_CONFIG_PATH))];
+    if (!allowedRoots.some(root => resolved === path.resolve(DS_CONFIG_PATH) || resolved.startsWith(root + path.sep) || resolved.startsWith(root + '/'))) {
+        throw Object.assign(new Error('Refusing to delete a file outside the auth pool'), { status: 403, type: 'forbidden' });
+    }
+    fs.unlinkSync(account.file);
+    loadDeepSeekConfig({ fatal: false });
+    return true;
+}
+const DASHBOARD_DIR = path.join(__dirname, 'dashboard');
+const DASHBOARD_TYPES = {
+    '.html': 'text/html; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.png': 'image/png',
+};
+function serveDashboardAsset(res, pathname) {
+    let rel = (pathname === '/dashboard' || pathname === '/dashboard/') ? 'index.html' : pathname.replace(/^\/dashboard\//, '');
+    if (!rel || rel.includes('..')) {
+        res.writeHead(400); res.end('Bad path'); return;
+    }
+    const file = path.resolve(DASHBOARD_DIR, rel);
+    if (file !== DASHBOARD_DIR && !file.startsWith(DASHBOARD_DIR + path.sep)) {
+        res.writeHead(403); res.end('Forbidden'); return;
+    }
+    fs.readFile(file, (err, data) => {
+        if (err) { res.writeHead(404); res.end('Not found'); return; }
+        res.writeHead(200, { 'Content-Type': DASHBOARD_TYPES[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
+        res.end(data);
+    });
+}
+async function handleAdmin(req, res, url) {
+    if (req.method === 'GET' && url.pathname === '/v1/admin/state') {
+        const usage = [...usageByAccount.entries()].map(([id, u]) => ({ account: id, ...u }));
+        jsonResponse(res, 200, {
+            accounts: accounts.map(accountStatus),
+            locks: listAccountChatLocks(),
+            in_flight: inFlight,
+            requests: requestLog.slice(-200).reverse(),
+            usage,
+            totals: usage.reduce((acc, u) => {
+                acc.prompt_tokens += u.prompt_tokens;
+                acc.completion_tokens += u.completion_tokens;
+                acc.usd += u.usd;
+                acc.requests += u.requests;
+                return acc;
+            }, { prompt_tokens: 0, completion_tokens: 0, usd: 0, requests: 0 }),
+        });
+        return;
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/admin/accounts') {
+        const body = await readRequestJson(req);
+        const auth = body.auth && typeof body.auth === 'object' ? body.auth : body;
+        const token = String(auth.token || '').trim();
+        const cookie = String(auth.cookie || '').trim();
+        if (!token || !cookie) {
+            jsonResponse(res, 400, { error: { message: 'token and cookie are required', type: 'invalid_auth' } });
+            return;
+        }
+        const label = String(auth.name || body.name || '').trim().slice(0, 80);
+        const file = writeNewAccountFile(body.name || 'account', {
+            token,
+            cookie,
+            hif_dliq: String(auth.hif_dliq || ''),
+            hif_leim: String(auth.hif_leim || ''),
+            wasmUrl: String(auth.wasmUrl || 'https://fe-static.deepseek.com/chat/static/sha3_wasm_bg.7b9ca65ddd.wasm'),
+            ...(label ? { name: label } : {}),
+        });
+        jsonResponse(res, 201, { ok: true, file: path.basename(file), accounts: accounts.map(accountStatus) });
+        return;
+    }
+    if (req.method === 'DELETE' && url.pathname === '/v1/admin/accounts') {
+        const id = url.searchParams.get('id');
+        if (!id) {
+            jsonResponse(res, 400, { error: { message: 'id query is required', type: 'invalid_request' } });
+            return;
+        }
+        const removed = removeAccountFile(id);
+        if (!removed) {
+            jsonResponse(res, 404, { error: { message: `Unknown account ${id}`, type: 'not_found' } });
+            return;
+        }
+        jsonResponse(res, 200, { ok: true, accounts: accounts.map(accountStatus) });
+        return;
+    }
+    if (req.method === 'PATCH' && url.pathname === '/v1/admin/accounts') {
+        const body = await readRequestJson(req);
+        const id = body.id || url.searchParams.get('id');
+        if (!id) {
+            jsonResponse(res, 400, { error: { message: 'id is required', type: 'invalid_request' } });
+            return;
+        }
+        const updated = applyAccountPatch(id, body);
+        jsonResponse(res, 200, { ok: true, account: updated, accounts: accounts.map(accountStatus) });
+        return;
+    }
+    if (req.method === 'POST' && url.pathname === '/v1/admin/accounts/cooldown-clear') {
+        const id = url.searchParams.get('id');
+        const account = accounts.find(a => a.id === id);
+        if (!account) {
+            jsonResponse(res, 404, { error: { message: `Unknown account ${id}`, type: 'not_found' } });
+            return;
+        }
+        account.cooldownUntil = 0;
+        jsonResponse(res, 200, { ok: true, accounts: accounts.map(accountStatus) });
+        return;
+    }
+    jsonResponse(res, 404, { error: { message: 'Unknown admin route', type: 'not_found' } });
+}
+function readRequestJson(req) {
+    return new Promise((resolve, reject) => {
+        let body = '';
+        req.on('data', chunk => { body += chunk; if (body.length > 2 * 1024 * 1024) { req.destroy(); reject(new Error('body too large')); } });
+        req.on('end', () => {
+            try { resolve(JSON.parse(body || '{}')); }
+            catch (e) { reject(e); }
+        });
+        req.on('error', reject);
+    });
 }
 // Parse a Retry-After header value into a cooldown duration in ms, or null if
 // absent/unparseable. Supports both forms: delta-seconds (e.g. "120") and an
@@ -489,11 +830,12 @@ function resolveModelConfig(model) {
 function isKnownModel(model) { return Object.prototype.hasOwnProperty.call(MODEL_CONFIGS, canonicalizeModelId(model)); }
 function isSupportedModel(model) { return resolveModelConfig(model).supported === true; }
 
-async function askDeepSeekStream(prompt, agentId, model = DEFAULT_MODEL_ID, freshSessionPrompt = prompt) {
+async function askDeepSeekStream(prompt, agentId, model = DEFAULT_MODEL_ID, freshSessionPrompt = prompt, lockHolder = null) {
     const modelCfg = resolveModelConfig(model);
     const session = getOrCreateAgentSession(agentId);
     const hadRemoteSession = Boolean(session.id);
-    const account = selectAccountForSession(session);
+    const account = selectAccountForSession(session, lockHolder);
+    acquireAccountChatLock(account, lockHolder);
     const dsHeaders = account.headers;
     account.lastUsedAt = Date.now();
     const agentTag = `[${agentId}/acct:${account.id}]`;
@@ -1480,14 +1822,18 @@ function sendOpenAIStream(res, openaiResp) {
     }
     if (hasToolCalls) {
         res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { role: 'assistant', content: null, tool_calls: msg.tool_calls }, finish_reason: null }] })}\n\n`);
-        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\ndata: [DONE]\n\n`);
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'tool_calls' }] })}\n\n`);
     } else {
         for (let i = 0; i < (msg.content || '').length; i += 50) {
             const chunk = msg.content.substring(i, i + 50);
             res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: chunk }, finish_reason: null }] })}\n\n`);
         }
-        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\ndata: [DONE]\n\n`);
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] })}\n\n`);
     }
+    if (openaiResp.usage) {
+        res.write(`data: ${JSON.stringify({ id, object: 'chat.completion.chunk', created, model, choices: [], usage: openaiResp.usage })}\n\n`);
+    }
+    res.write('data: [DONE]\n\n');
     res.end();
 }
 
@@ -1726,6 +2072,22 @@ const server = http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') { res.writeHead(204); res.end(); return; }
 
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const isDashboardPath = url.pathname === '/dashboard' || url.pathname.startsWith('/dashboard/') || url.pathname.startsWith('/v1/admin');
+    if (isDashboardPath) {
+        if (!isDashboardAllowed(req)) {
+            jsonResponse(res, 401, { error: { message: 'Dashboard is loopback-only unless you send Authorization: Bearer <PROXY_API_KEY>', type: 'authentication_error' } });
+            return;
+        }
+        if (url.pathname === '/dashboard' || url.pathname.startsWith('/dashboard/')) {
+            serveDashboardAsset(res, url.pathname);
+            return;
+        }
+        handleAdmin(req, res, url).catch((e) => {
+            jsonResponse(res, e.status || 400, { error: { message: e.message, type: e.type || 'invalid_request' } });
+        });
+        return;
+    }
+
     const isPublicProbe = req.method === 'GET' && (url.pathname === '/' || url.pathname === '/health' || url.pathname === '/readyz');
     if (!isPublicProbe && !isProxyAuthorized(req.headers.authorization)) {
         res.writeHead(401, {
@@ -1745,6 +2107,7 @@ const server = http.createServer(async (req, res) => {
             unsupported_models: Object.keys(MODEL_CONFIGS).filter(id => !MODEL_CONFIGS[id].supported),
             agents: sessions.size,
             in_flight: inFlight,
+            chat_locks: listAccountChatLocks(),
             accounts: accounts.map(accountStatus),
             config_ready: hasAuthConfig(),
             session_reuse: { strategy: 'sticky per x-agent-session/user', ttl_minutes: Math.round(SESSION_TTL_MS / 60000), max_messages: MAX_MESSAGE_DEPTH, reset_all: 'POST /reset-session?agent=all' },
@@ -1758,7 +2121,7 @@ const server = http.createServer(async (req, res) => {
     // one account can serve right now, so an aggregator/LB won't route to a cold pool.
     if (req.method === 'GET' && url.pathname === '/readyz') {
         const now = Date.now();
-        const ready = accounts.filter(a => a.config.token && a.config.cookie && a.cooldownUntil <= now).length;
+        const ready = accounts.filter(a => accountCanServe(a, now)).length;
         res.writeHead(ready > 0 ? 200 : 503, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ ready: ready > 0, ready_accounts: ready, total_accounts: accounts.length }));
         return;
@@ -1855,6 +2218,21 @@ const server = http.createServer(async (req, res) => {
         const deadlineHit = () => Date.now() - requestStartedAt > REQUEST_DEADLINE_MS;
         let activeSession = null;
         let activeAgentId = null;
+        const lockHolder = { id: crypto.randomUUID(), agentId: null };
+        const logRow = {
+            ts: requestStartedAt,
+            ip: clientIp(req),
+            path: url.pathname,
+            status: 0,
+            ok: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            usd: 0,
+            ms: 0,
+            agent: null,
+            account: null,
+            model: null,
+        };
         try {
             const rawParams = JSON.parse(body || '{}');
             const params = normalizeApiParams(rawParams, apiMode);
@@ -1862,18 +2240,7 @@ const server = http.createServer(async (req, res) => {
             const tools = params.tools || [];
             const stream = params.stream === true;
             const requestedModel = canonicalizeModelId(params.model || DEFAULT_MODEL_ID);
-            if (!isKnownModel(requestedModel)) {
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: { message: `Unknown model: ${requestedModel}`, type: 'invalid_model', supported_models: SUPPORTED_MODEL_IDS, model_capabilities_url: '/v1/model-capabilities' } }));
-                return;
-            }
-            if (!isSupportedModel(requestedModel)) {
-                const cfg = resolveModelConfig(requestedModel);
-                res.writeHead(400, { 'Content-Type': 'application/json' });
-                res.end(JSON.stringify({ error: { message: `${requestedModel} is not currently supported through this DeepSeek Web API path`, type: 'unsupported_model', model: requestedModel, real_model: cfg.real_model, reason: cfg.unavailable_reason, capabilities: cfg.capabilities, supported_models: SUPPORTED_MODEL_IDS } }));
-                return;
-            }
-            // Use remote IP for session isolation (local gets 'dev-agent', external per-IP)
+            logRow.model = requestedModel;
             const remoteAddr = req.socket.remoteAddress || 'unknown';
             const requestedSession = req.headers['x-agent-session'] || params.session || params.user;
             const agentId = requestedSession
@@ -1881,6 +2248,21 @@ const server = http.createServer(async (req, res) => {
                 : ((remoteAddr === '127.0.0.1' || remoteAddr === '::1' || remoteAddr === '::ffff:127.0.0.1') ? 'dev-agent' : remoteAddr);
             const agentTag = `[${agentId}]`;
             activeAgentId = agentId;
+            lockHolder.agentId = agentId;
+            logRow.agent = agentId;
+            if (!isKnownModel(requestedModel)) {
+                logRow.status = 400;
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: `Unknown model: ${requestedModel}`, type: 'invalid_model', supported_models: SUPPORTED_MODEL_IDS, model_capabilities_url: '/v1/model-capabilities' } }));
+                return;
+            }
+            if (!isSupportedModel(requestedModel)) {
+                logRow.status = 400;
+                const cfg = resolveModelConfig(requestedModel);
+                res.writeHead(400, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: { message: `${requestedModel} is not currently supported through this DeepSeek Web API path`, type: 'unsupported_model', model: requestedModel, real_model: cfg.real_model, reason: cfg.unavailable_reason, capabilities: cfg.capabilities, supported_models: SUPPORTED_MODEL_IDS } }));
+                return;
+            }
 
             // "/new" command: if the latest user message is exactly "/new" (whitespace-insensitive),
             // reset this agent's DeepSeek session/history instead of forwarding anything to DeepSeek.
@@ -1949,7 +2331,7 @@ const server = http.createServer(async (req, res) => {
             }
 
             const startTime = Date.now();
-            const initialCall = await askDeepSeekStream(fullPrompt, agentId, requestedModel, freshPromptBuild.prompt);
+            const initialCall = await askDeepSeekStream(fullPrompt, agentId, requestedModel, freshPromptBuild.prompt, lockHolder);
             const dsResp = initialCall.resp;
             if (initialCall.promptUsed !== fullPrompt) {
                 fullPrompt = initialCall.promptUsed;
@@ -2087,7 +2469,7 @@ const server = http.createServer(async (req, res) => {
                 resetRemoteSession(session);
                 // Brief delay before retry to let DeepSeek breathe
                 await new Promise(r => setTimeout(r, Math.min(500 * retryAttempt, 1500)));
-                const { resp: retryResp } = await askDeepSeekStream(retryPrompt, agentId, requestedModel);
+                const { resp: retryResp } = await askDeepSeekStream(retryPrompt, agentId, requestedModel, retryPrompt, lockHolder);
                 const retryResult = await readDeepSeekResponse(retryResp.body);
                 const retryState = normalizeRetryResponse(retryResult);
                 fullPrompt = retryPrompt;
@@ -2150,7 +2532,8 @@ const server = http.createServer(async (req, res) => {
                     'continue',
                     agentId,
                     requestedModel,
-                    continuationRecoveryPrompt
+                    continuationRecoveryPrompt,
+                    lockHolder
                 );
                 const { resp: contResp, account: contAccount } = continuationCall;
                 // A cross-account continuation is valid only when the call
@@ -2195,7 +2578,7 @@ const server = http.createServer(async (req, res) => {
                     freshPromptBuild.prompt,
                     '[STRICT INSTRUCTION] Your previous response contained incomplete tool-call markup. Keep arguments short and output ONLY strict JSON: {"tool_call":{"name":"<function>","arguments":{...}}}'
                 );
-                const { resp: retryResp2 } = await askDeepSeekStream(strictPrompt, agentId, requestedModel);
+                const { resp: retryResp2 } = await askDeepSeekStream(strictPrompt, agentId, requestedModel, strictPrompt, lockHolder);
                 const retryResult2 = await readDeepSeekResponse(retryResp2.body);
                 const retryContent2 = retryResult2 && retryResult2.content ? sanitizeContent(retryResult2.content) : '';
                 if (retryContent2 && retryContent2.trim()) {
@@ -2247,6 +2630,14 @@ const server = http.createServer(async (req, res) => {
                 ? buildToolCallResponse(toolCall, requestedModel, clientPromptText, reasoningContent)
                 : buildTextResponse(fullContent, clientPromptText, requestedModel, reasoningContent, finishReason);
 
+            logRow.ok = true;
+            logRow.status = 200;
+            logRow.account = session.accountId;
+            logRow.prompt_tokens = openaiResponse.usage?.prompt_tokens || 0;
+            logRow.completion_tokens = openaiResponse.usage?.completion_tokens || 0;
+            logRow.usd = modelCostUsd(requestedModel, logRow.prompt_tokens, logRow.completion_tokens);
+            res.setHeader('x-account-id', session.accountId || '');
+
             if (stream) {
                 if (apiMode === 'anthropic') {
                     sendAnthropicStream(res, openaiResponse);
@@ -2274,6 +2665,8 @@ const server = http.createServer(async (req, res) => {
             // 429/503 (not a generic 500) and can honor Retry-After.
             const timedOut = isTimeoutError(e);
             const status = e.status || (timedOut ? 504 : 500);
+            logRow.status = status;
+            logRow.account = activeSession?.accountId || null;
             const headers = { 'Content-Type': 'application/json' };
             if (status === 429 && e.retryAfter) headers['Retry-After'] = String(e.retryAfter);
             res.writeHead(status, headers);
@@ -2290,6 +2683,11 @@ const server = http.createServer(async (req, res) => {
                 } : {}),
             } }));
         } finally {
+            logRow.ms = Date.now() - requestStartedAt;
+            if (!logRow.status) logRow.status = res.statusCode || 0;
+            if (!logRow.account) logRow.account = activeSession?.accountId || null;
+            recordRequest(logRow);
+            releaseAccountChatLock(lockHolder);
             inFlight--;
         }
     });
@@ -2365,6 +2763,8 @@ async function main() {
     setInterval(sweepIdleSessions, 10 * 60 * 1000).unref();
     server.listen(PORT, HOST, () => {
         console.log(`[DS-API] Server on http://${HOST}:${PORT} (multi-agent sessions enabled)`);
+        const dashHost = HOST === '0.0.0.0' || HOST === '::' ? '127.0.0.1' : HOST;
+        console.log(`[DS-API] Dashboard: http://${dashHost}:${PORT}/dashboard`);
         console.log(`[DS-API] ${formatWatermark()}`);
         console.log('[DS-API] POST /v1/chat/completions (OpenAI Chat Completions, stream=true|false)');
         console.log('[DS-API] POST /v1/messages — Anthropic Messages shim for Claude Code');
@@ -2423,6 +2823,16 @@ module.exports = {
         sessions,
         accounts,
         selectAccountForSession,
+        acquireAccountChatLock,
+        releaseAccountChatLock,
+        listAccountChatLocks,
+        discoverAuthPaths,
+        applyAccountPatch,
+        persistAccountConfig,
+        accountCanServe,
+        accountStatus,
+        clientIp,
+        modelCostUsd,
         isProxyAuthorized,
         loadProxyApiKey,
         requireProxyApiKey,
