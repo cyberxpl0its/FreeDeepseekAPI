@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/assets/header.png" alt="FreeDeepseekAPI" width="960" />
-
 [English](README.md) · [Русский](README.ru.md) · **简体中文**
 
 <p>
