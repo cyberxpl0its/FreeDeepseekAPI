@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/header.svg" alt="FreeDeepseekAPI" width="960" />
+<img src="docs/assets/header.gif" alt="FreeDeepseekAPI" width="960" />
 
 **English** · [Русский](README.ru.md) · [简体中文](README.zh.md)
 
@@ -97,10 +97,10 @@ podman run --rm \
 
 ## Stars
 
-<a href="https://star-history.com/#dekrezz/FreeDeepseekAPI&Date">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=dekrezz/FreeDeepseekAPI&type=Date&theme=dark" />
-    <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=dekrezz/FreeDeepseekAPI&type=Date" />
-    <img alt="Star history" src="https://api.star-history.com/svg?repos=dekrezz/FreeDeepseekAPI&type=Date" />
-  </picture>
+<p>
+  <a href="https://github.com/dekrezz/FreeDeepseekAPI/stargazers"><img src="https://img.shields.io/github/stars/dekrezz/FreeDeepseekAPI?style=for-the-badge&logo=github&color=3ee0c8&label=stars" alt="GitHub stars" /></a>
+</p>
+
+<a href="https://github.com/dekrezz/FreeDeepseekAPI/stargazers">
+  <img src="docs/assets/stars.png" alt="Star history" width="800" />
 </a>
